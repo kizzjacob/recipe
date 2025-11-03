@@ -1,5 +1,5 @@
 const {
-
+models:{recipe:{Recipe}}
 } = require('../../models/recipe');
 
 module.exports = async hex => {
