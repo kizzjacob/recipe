@@ -37,6 +37,51 @@ module.exports = (sequelize, Sequelize, User) => {
     }
   });
 
+
+  // add after sync hook to search column tsvector and create the GIN index
+	Recipe.afterSync(async () => {
+		// Run the raw SQL query to add the `ts` column
+		await sequelize.query(/* SQL */`ALTER TABLE recipes ADD COLUMN IF NOT EXISTS search TSVECTOR
+			GENERATED ALWAYS AS(setweight(to_tsvector('english', coalesce(name, '')), 'A') || setweight(to_tsvector('english', coalesce(description, '')), 'B')) STORED;
+		`);
+
+		// create the GIN index for the full_search column
+		sequelize.query(`CREATE INDEX IF NOT EXISTS search_recipes_idx ON recipes USING GIN(search)`);
+	});
+
+  // add search property to the recipe model
+	Recipe.search = async options => {
+		const { user, query, offset, limit } = options;
+		// check if the user is not null
+		if (user !== null) {
+			return await sequelize.query(/*sql*/`
+    		SELECT r.id, r.hex, r.chef, r.name, r.description, r.video, r.images, r.tags, r.reviews, r.views, r.likes, r.responses, r."createdAt", r."updatedAt",
+        	COALESCE(l.liked, false) AS liked, COALESCE(v.viewed, false) AS viewed, ts_rank_cd(r.search, to_tsquery('english', '${query}')) AS rank, COALESCE(r.chef = :user, false) AS you,
+        	JSON_BUILD_OBJECT('id', u.id, 'username', u.username, 'name', u.name, 'picture', u.picture, 'bio', u.bio, 'followers', u.followers, 'following', u.following, 'recipes', u.recipes, 'reviews', u.reviews, 'role', u.role) AS author
+        FROM recipes r
+        LEFT JOIN users u ON r.chef = u.username
+        LEFT JOIN (SELECT recipe, true AS liked FROM likes WHERE "user" = :user) AS l ON r.hex = l.recipe
+        LEFT JOIN (SELECT recipe, true AS viewed FROM views WHERE "user" = :user) AS v ON r.hex = v.recipe
+        WHERE to_tsvector('english', r.name || ' ' || COALESCE(r.description, '')) @@ to_tsquery('english', :query)
+        ORDER BY rank DESC, r."createdAt" DESC
+        LIMIT :limit
+        OFFSET :offset;
+			`, { replacements: { user, query, offset, limit }, type: sequelize.QueryTypes.SELECT });
+		} else {
+			return await sequelize.query(/*sql*/`
+        SELECT r.id, r.hex, r.chef, r.name, r.description, r.video, r.images, r.tags, r.reviews, r.views, r.likes, r.responses, r."createdAt", r."updatedAt",
+        	false AS liked, false AS viewed, ts_rank_cd(r.search, to_tsquery('english', '${query}')) AS rank, false AS you,
+        	JSON_BUILD_OBJECT('id', u.id, 'username', u.username, 'name', u.name, 'picture', u.picture, 'bio', u.bio, 'followers', u.followers, 'following', u.following, 'recipes', u.recipes, 'reviews', u.reviews, 'role', u.role) AS author
+        FROM recipes r
+    		LEFT JOIN users u ON r.chef = u.username
+        WHERE to_tsvector('english', r.name || ' ' || COALESCE(r.description, '')) @@ to_tsquery('english', :query)
+        ORDER BY rank DESC, r."createdAt" DESC
+        LIMIT :limit
+    		OFFSET :offset;
+			`, { replacements: {query, offset, limit }, type: sequelize.QueryTypes.SELECT });
+		}
+	}
+
   // Ingredients table
   const Ingredient = sequelize.define("ingredients", {
     id: { type: Sequelize.INTEGER, autoIncrement: true, primaryKey: true },
